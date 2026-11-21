@@ -22,8 +22,9 @@ import (
 const maxProfileH3Body = 32 << 20
 
 type profileH3Params struct {
-	URL     string      `json:"url"`
-	Headers http.Header `json:"headers"`
+	URL     string          `json:"url"`
+	Headers http.Header     `json:"headers"`
+	Proxy   *profileH3Proxy `json:"proxy"`
 }
 
 type profileH3Response struct {
@@ -64,23 +65,39 @@ func downloadProfileH3(params profileH3Params, dnsResolver resolver.Resolver, ro
 		return nil, nil
 	}
 
+	dial := func(ctx context.Context, _ string, config *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+		addresses, err := dnsResolver.LookupIP(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+		for _, address := range addresses {
+			dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			conn, err := quic.DialAddr(dialCtx, net.JoinHostPort(address.String(), targetPort), config, quicConfig)
+			cancel()
+			if err == nil {
+				return conn, nil
+			}
+		}
+		return nil, errors.New("HTTP/3 subscription handshake failed")
+	}
+	var quicConfig *quic.Config
+	if params.Proxy != nil {
+		packetConn, remote, err := params.Proxy.connect(ctx, dnsResolver, target, targetPort)
+		if err != nil {
+			return nil, err
+		}
+		defer packetConn.Close()
+		proxyTransport := &quic.Transport{Conn: packetConn}
+		defer proxyTransport.Close()
+		quicConfig = &quic.Config{DisablePathMTUDiscovery: true}
+		dial = func(ctx context.Context, _ string, config *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+			return proxyTransport.Dial(ctx, remote, config, quicConfig)
+		}
+	}
 	transport := &http3.Transport{
 		TLSClientConfig: &tls.Config{ServerName: host, RootCAs: roots},
-		Dial: func(ctx context.Context, _ string, config *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
-			addresses, err := dnsResolver.LookupIP(ctx, target)
-			if err != nil {
-				return nil, err
-			}
-			for _, address := range addresses {
-				dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				conn, err := quic.DialAddr(dialCtx, net.JoinHostPort(address.String(), targetPort), config, quicConfig)
-				cancel()
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, errors.New("HTTP/3 subscription handshake failed")
-		},
+		QUICConfig:      quicConfig,
+		Dial:            dial,
 	}
 	defer transport.Close()
 

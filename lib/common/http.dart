@@ -37,21 +37,30 @@ class FlClashHttpOverrides extends HttpOverrides {
   }
 
   static String findProxyForReader(ProviderReader read, Uri url) {
+    final proxy = localProxyForReader(read, url);
+    if (proxy == null) return 'DIRECT';
+    final credentials = proxy.authentication.credentials;
+    final userInfo = credentials.isNotEmpty ? '${credentials.first}@' : '';
+    return 'PROXY ${userInfo}localhost:${proxy.port}';
+  }
+
+  static ({int port, AuthenticationProps authentication})? localProxyForReader(
+    ProviderReader read,
+    Uri url,
+  ) {
     if ([localhost].contains(url.host)) {
-      return 'DIRECT';
+      return null;
     }
     final isStart = read(isStartProvider);
     final suspend = read(suspendProvider);
-    if (!isStart || suspend) return 'DIRECT';
+    if (!isStart || suspend) return null;
     final mixedPort = read(
       patchClashConfigProvider.select((state) => state.mixedPort),
     );
     final authentication = read(
       networkSettingProvider.select((state) => state.authentication),
     );
-    final credentials = authentication.credentials;
-    final userInfo = credentials.isNotEmpty ? '${credentials.first}@' : '';
-    return 'PROXY ${userInfo}localhost:$mixedPort';
+    return (port: mixedPort, authentication: authentication);
   }
 
   static bool allowBadCertificate(

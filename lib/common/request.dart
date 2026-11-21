@@ -10,6 +10,7 @@ import 'package:fl_clash/common/release_asset.dart';
 import 'package:fl_clash/core/controller.dart';
 import 'package:fl_clash/core/method.dart';
 import 'package:fl_clash/enum/enum.dart';
+import 'package:fl_clash/models/config.dart';
 import 'package:fl_clash/plugins/app.dart';
 import 'package:fl_clash/state.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -97,10 +98,21 @@ class Request {
 
   Future<Response<Uint8List>> getProfileResponseForUrl(String url) async {
     final target = downloadTarget(url);
-    if (_read != null &&
-        target.uri.scheme == 'https' &&
-        _findProxy(target.uri) == 'DIRECT') {
-      final response = await _tryProfileHttp3(target.uri, target.headers);
+    if (_read case final read? when target.uri.scheme == 'https') {
+      final proxy = FlClashHttpOverrides.localProxyForReader(read, target.uri);
+      final response = await _tryProfileHttp3(
+        target.uri,
+        target.headers,
+        proxy: proxy == null
+            ? null
+            : {
+                'port': proxy.port,
+                if (proxy.authentication.credentials.isNotEmpty) ...{
+                  'username': proxy.authentication.username,
+                  'password': proxy.authentication.password,
+                },
+              },
+      );
       if (response != null) return response;
     }
     return getFileResponseForUrl(url);
@@ -108,26 +120,30 @@ class Request {
 
   Future<Response<Uint8List>?> _tryProfileHttp3(
     Uri uri,
-    Map<String, Object> headers,
-  ) async {
+    Map<String, Object> headers, {
+    required Map<String, Object>? proxy,
+  }) async {
     final requestOptions = RequestOptions(
       path: uri.toString(),
       headers: headers,
     );
     final Map<String, dynamic>? result;
     try {
-      result = await coreController.invokeMethod(
-        method: CoreMethod.profileDownloadH3,
-        arguments: {
-          'url': uri.toString(),
-          'headers': {
-            for (final entry in headers.entries)
-              entry.key: [entry.value.toString()],
-            'User-Agent': [globalState.ua],
-          },
-        },
-        timeout: const Duration(seconds: 9),
-      ) as Map<String, dynamic>?;
+      result =
+          await coreController.invokeMethod(
+                method: CoreMethod.profileDownloadH3,
+                arguments: {
+                  'url': uri.toString(),
+                  'proxy': ?proxy,
+                  'headers': {
+                    for (final entry in headers.entries)
+                      entry.key: [entry.value.toString()],
+                    'User-Agent': [globalState.ua],
+                  },
+                },
+                timeout: const Duration(seconds: 9),
+              )
+              as Map<String, dynamic>?;
     } on Exception {
       commonPrint.log('HTTP/3 profile download failed; trying HTTPS over TCP');
       return null;

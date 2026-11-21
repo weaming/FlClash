@@ -6,10 +6,20 @@ import (
 	"net"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/metacubex/http"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/component/auth"
 	"github.com/metacubex/mihomo/component/resolver"
+	C "github.com/metacubex/mihomo/constant"
+	authStore "github.com/metacubex/mihomo/listener/auth"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/mixed"
+	"github.com/metacubex/mihomo/listener/socks"
 	"github.com/metacubex/quic-go/http3"
 	"github.com/metacubex/tls"
 	"github.com/miekg/dns"
@@ -18,6 +28,7 @@ import (
 type profileTestResolver struct {
 	resolver.Resolver
 	port uint16
+	ip   netip.Addr
 }
 
 func (r profileTestResolver) ExchangeContext(_ context.Context, query *dns.Msg) (*dns.Msg, error) {
@@ -37,7 +48,7 @@ func (r profileTestResolver) LookupIP(_ context.Context, host string) ([]netip.A
 	if host != "edge.example.com" {
 		return nil, resolver.ErrIPNotFound
 	}
-	return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	return []netip.Addr{r.ip}, nil
 }
 
 func TestDownloadProfileH3(t *testing.T) {
@@ -72,14 +83,99 @@ func TestDownloadProfileH3(t *testing.T) {
 		URL:     "https://example.com/config?version=1",
 		Headers: http.Header{"authorization": {"Basic dGVzdDp0ZXN0"}},
 	}
-	dnsResolver := profileTestResolver{port: uint16(socket.LocalAddr().(*net.UDPAddr).Port)}
-	response, err := downloadProfileH3(params, dnsResolver, roots)
+	serverAddr := socket.LocalAddr().(*net.UDPAddr)
+	dnsResolver := profileTestResolver{port: uint16(serverAddr.Port), ip: netip.MustParseAddr("127.0.0.1")}
+	checkDownload := func(t *testing.T, params profileH3Params, dnsResolver profileTestResolver) {
+		t.Helper()
+		response, err := downloadProfileH3(params, dnsResolver, roots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response == nil || response.Status != http.StatusOK || string(response.Body) != config ||
+			response.Headers.Get("Subscription-Userinfo") != "total=42" {
+			t.Fatalf("unexpected subscription response: %+v", response)
+		}
+	}
+	t.Run("direct", func(t *testing.T) {
+		checkDownload(t, params, dnsResolver)
+	})
+	t.Run("authenticated mixed port", func(t *testing.T) {
+		tunnel := newProfileTestUDPTunnel(t, serverAddr)
+		store := authStore.NewAuthStore(auth.NewAuthenticator([]auth.AuthUser{{User: "profile", Pass: "secret"}}))
+		listener, err := mixed.NewWithConfig(LC.AuthServer{
+			Enable: true, Listen: "127.0.0.1:0", AuthStore: store,
+		}, inbound.NewListenConfig(), tunnel, inbound.WithInName("profile-test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+		udpListener, err := socks.NewUDP(listener.Address(), tunnel, inbound.WithInName("profile-test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = udpListener.Close() })
+
+		_, port, err := net.SplitHostPort(listener.Address())
+		if err != nil {
+			t.Fatal(err)
+		}
+		proxyPort, err := strconv.Atoi(port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params.Proxy = &profileH3Proxy{Port: proxyPort, Username: "profile", Password: "secret"}
+		dnsResolver.ip = netip.MustParseAddr("192.0.2.1")
+		checkDownload(t, params, dnsResolver)
+		if !tunnel.domainMatched.Load() {
+			t.Fatal("the mixed listener did not receive the advertised hostname and port")
+		}
+		params.Proxy.Password = "wrong-password"
+		dnsResolver.ip = netip.MustParseAddr("127.0.0.1")
+		if response, err := downloadProfileH3(params, dnsResolver, roots); response != nil || err == nil {
+			t.Fatal("a rejected proxy login must fail without trying a direct connection")
+		}
+	})
+}
+
+type profileTestUDPTunnel struct {
+	C.Tunnel
+	conn          *net.UDPConn
+	startRelay    sync.Once
+	domainMatched atomic.Bool
+}
+
+func newProfileTestUDPTunnel(t *testing.T, target *net.UDPAddr) *profileTestUDPTunnel {
+	t.Helper()
+	conn, err := net.DialUDP("udp4", nil, target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response == nil || response.Status != http.StatusOK || string(response.Body) != config ||
-		response.Headers.Get("Subscription-Userinfo") != "total=42" {
-		t.Fatalf("unexpected subscription response: %+v", response)
+	t.Cleanup(func() { _ = conn.Close() })
+	return &profileTestUDPTunnel{conn: conn}
+}
+
+func (tunnel *profileTestUDPTunnel) HandleUDPPacket(packet C.UDPPacket, metadata *C.Metadata) {
+	defer packet.Drop()
+	if metadata.Host != "edge.example.com" || int(metadata.DstPort) != tunnel.conn.RemoteAddr().(*net.UDPAddr).Port {
+		return
+	}
+	tunnel.domainMatched.Store(true)
+	tunnel.startRelay.Do(func() {
+		go func() {
+			buffer := make([]byte, 64<<10)
+			for {
+				count, err := tunnel.conn.Read(buffer)
+				if err != nil {
+					return
+				}
+				if _, err := packet.WriteBack(buffer[:count], tunnel.conn.RemoteAddr()); err != nil {
+					return
+				}
+			}
+		}()
+	})
+	if _, err := tunnel.conn.Write(packet.Data()); err != nil {
+		_ = tunnel.conn.Close()
 	}
 }
 
