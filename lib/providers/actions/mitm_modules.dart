@@ -425,26 +425,21 @@ class MitmModulesAction extends _$MitmModulesAction {
       final interval = Duration(hours: setting.geoUpdateInterval);
       final resourcesDir = await appPath.mitmResourcesDirPath;
       for (final module in await database.mitmModulesDao.query().get()) {
-        final missing =
-            !await File(await _pathOf(module)).exists() ||
-            !(await Future.wait([
-              for (final name in module.resources.values)
-                File(join(resourcesDir, name)).exists(),
-            ])).every((exists) => exists);
-        final due =
-            setting.geoAutoUpdate &&
-            module.isRemote &&
-            module.lastUpdateTime.add(interval).isBeforeNow;
-        if (!due && !missing) {
-          continue;
-        }
-        if (!ref.mounted) {
-          return;
-        }
-        if (!module.isRemote && !await File(await _pathOf(module)).exists()) {
-          continue;
-        }
         try {
+          final hasModule = await File(await _pathOf(module)).exists();
+          if (!module.isRemote && !hasModule) continue;
+          final missing =
+              !hasModule ||
+              !(await Future.wait([
+                for (final name in module.resources.values)
+                  File(join(resourcesDir, name)).exists(),
+              ])).every((exists) => exists);
+          final due =
+              setting.geoAutoUpdate &&
+              module.isRemote &&
+              module.lastUpdateTime.add(interval).isBeforeNow;
+          if (!due && !missing) continue;
+          if (!ref.mounted) return;
           await updateModule(module);
         } catch (e) {
           commonPrint.log(

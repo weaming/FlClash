@@ -438,6 +438,26 @@ func TestReconcileGeoUpdaterRegistersWhenTheSettingIsOn(t *testing.T) {
 	}
 }
 
+func TestGeoUpdateLoopKeepsScheduledAttemptsAfterFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Now()
+
+	attempts := 0
+	runGeoUpdateLoop(ctx, ticks, true, func() error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("resource unavailable")
+		}
+		cancel()
+		return nil
+	})
+	if attempts != 2 {
+		t.Fatalf("automatic update made %d attempts, want 2", attempts)
+	}
+}
+
 func TestCurrentTestURLFallsBackToTheBuiltInProbe(t *testing.T) {
 	previous := testURL.Load()
 	t.Cleanup(func() { testURL.Store(previous) })

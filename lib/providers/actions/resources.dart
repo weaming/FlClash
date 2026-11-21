@@ -134,10 +134,12 @@ class ResourcesAction extends _$ResourcesAction {
         if (ref.read(coreStatusProvider) != CoreStatus.connected) {
           break;
         }
-        if (provider.isRemote &&
-            isDue((await provider.fileInfo)?.lastModified)) {
-          await _tryUpdate(provider.label, () => updateRuleProvider(provider));
-        }
+        if (!provider.isRemote) continue;
+        await _tryUpdate(provider.label, () async {
+          if (isDue((await provider.fileInfo)?.lastModified)) {
+            await updateRuleProvider(provider);
+          }
+        });
       }
     } finally {
       _autoUpdating = false;

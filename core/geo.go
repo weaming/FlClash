@@ -1,11 +1,16 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/updater"
+	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 )
 
@@ -79,9 +84,67 @@ func onGeoUpdate(geoType string, updating bool, skipped bool, updateErr error) {
 }
 
 var (
-	registerGeoUpdater = updater.RegisterGeoUpdaterWithCancel
-	stopGeoUpdater     = updater.StopGeoUpdater
+	registerGeoUpdater = startGeoUpdateLoop
+	stopGeoUpdater     = cancelGeoUpdateLoop
+	geoUpdateCancel    context.CancelFunc
 )
+
+func startGeoUpdateLoop() {
+	cancelGeoUpdateLoop()
+	hours := updater.GeoUpdateInterval()
+	interval := time.Duration(hours) * time.Hour
+	if interval <= 0 {
+		log.Warnln("[GEO] Invalid update interval: %d", hours)
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	geoUpdateCancel = cancel
+	safeGo("geoUpdateLoop", func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		runGeoUpdateLoop(ctx, ticker.C, isGeoUpdateDue(interval), updater.UpdateGeoDatabases)
+	})
+}
+
+func cancelGeoUpdateLoop() {
+	if geoUpdateCancel != nil {
+		geoUpdateCancel()
+		geoUpdateCancel = nil
+	}
+}
+
+func isGeoUpdateDue(interval time.Duration) bool {
+	paths := []string{constant.Path.GeoIP(), constant.Path.MMDB(), constant.Path.ASN(), constant.Path.GeoSite()}
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err == nil {
+			return time.Since(info.ModTime()) > interval
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warnln("[GEO] Could not check resource age: %v", err)
+		}
+	}
+	return false
+}
+
+func runGeoUpdateLoop(ctx context.Context, ticks <-chan time.Time, isDue bool, update func() error) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if isDue {
+			if err := update(); err != nil && !errors.Is(err, updater.ErrGetDatabaseUpdateSkip) {
+				log.Warnln("[GEO] Skipping failed automatic update: %v", err)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			isDue = true
+		}
+	}
+}
 
 func syncGeoUpdater(autoUpdate *bool, interval *int) {
 	changed := false
