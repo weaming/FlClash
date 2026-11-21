@@ -7,6 +7,8 @@ import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import 'package:fl_clash/common/common.dart';
 import 'package:fl_clash/common/release_asset.dart';
+import 'package:fl_clash/core/controller.dart';
+import 'package:fl_clash/core/method.dart';
 import 'package:fl_clash/enum/enum.dart';
 import 'package:fl_clash/plugins/app.dart';
 import 'package:fl_clash/state.dart';
@@ -91,6 +93,65 @@ class Request {
       );
       rethrow;
     }
+  }
+
+  Future<Response<Uint8List>> getProfileResponseForUrl(String url) async {
+    final target = downloadTarget(url);
+    if (_read != null &&
+        target.uri.scheme == 'https' &&
+        _findProxy(target.uri) == 'DIRECT') {
+      final response = await _tryProfileHttp3(target.uri, target.headers);
+      if (response != null) return response;
+    }
+    return getFileResponseForUrl(url);
+  }
+
+  Future<Response<Uint8List>?> _tryProfileHttp3(
+    Uri uri,
+    Map<String, Object> headers,
+  ) async {
+    final requestOptions = RequestOptions(
+      path: uri.toString(),
+      headers: headers,
+    );
+    final Map<String, dynamic>? result;
+    try {
+      result = await coreController.invokeMethod(
+        method: CoreMethod.profileDownloadH3,
+        arguments: {
+          'url': uri.toString(),
+          'headers': {
+            for (final entry in headers.entries)
+              entry.key: [entry.value.toString()],
+            'User-Agent': [globalState.ua],
+          },
+        },
+        timeout: const Duration(seconds: 9),
+      ) as Map<String, dynamic>?;
+    } on Exception {
+      commonPrint.log('HTTP/3 profile download failed; trying HTTPS over TCP');
+      return null;
+    }
+    if (result == null) return null;
+    final status = result['status'] as int;
+    final response = Response<Uint8List>(
+      requestOptions: requestOptions,
+      statusCode: status,
+      headers: Headers.fromMap(
+        (result['headers'] as Map<String, dynamic>).map(
+          (name, values) => MapEntry(name, List<String>.from(values as List)),
+        ),
+      ),
+      data: base64Decode(result['body'] as String),
+    );
+    if (status < 200 || status >= 300) {
+      throw DioException.badResponse(
+        statusCode: status,
+        requestOptions: requestOptions,
+        response: response,
+      );
+    }
+    return response;
   }
 
   Future<Response<String>> getTextResponseForUrl(String url) async {

@@ -29,6 +29,7 @@ const (
 	configReadMethod     CoreMethod = "config.read"
 
 	profileBaseMethod        CoreMethod = "profile.base"
+	profileDownloadH3Method  CoreMethod = "profile.downloadH3"
 	profileOutboundsMethod   CoreMethod = "profile.outbounds"
 	profileBuildMethod       CoreMethod = "profile.build"
 	profileClearEffectMethod CoreMethod = "profile.clearEffect"

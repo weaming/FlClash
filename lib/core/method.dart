@@ -15,6 +15,7 @@ enum CoreMethod {
   configDecrypt('config.decrypt'),
   configRead('config.read'),
   profileBase('profile.base'),
+  profileDownloadH3('profile.downloadH3'),
   profileOutbounds('profile.outbounds'),
   profileBuild('profile.build'),
   profileClearEffect('profile.clearEffect'),

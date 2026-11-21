@@ -194,6 +194,7 @@ var methodHandlers = map[CoreMethod]methodHandler{
 	configReadMethod:     withFallible(handleReadConfig),
 
 	profileBaseMethod:        withFallible(handleGetProfileBase),
+	profileDownloadH3Method:  withFallible(handleDownloadProfileH3),
 	profileOutboundsMethod:   withFallible(handleGetProfileOutbounds),
 	profileBuildMethod:       withFallible(handleBuildProfile),
 	profileClearEffectMethod: command(handleClearEffect),
